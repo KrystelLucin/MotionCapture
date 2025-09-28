@@ -1,126 +1,131 @@
-from typing import Dict, Tuple
 import math
 import numpy as np
+from typing import Dict, Tuple
 
-# Índices de landmarks (MediaPipe Pose)
+# Índices de MediaPipe Pose
 NOSE = 0
-L_ELBOW = 13
-R_ELBOW = 14
-L_SHOULDER = 11
-R_SHOULDER = 12
-L_WRIST = 15
-R_WRIST = 16
-L_HIP = 23
-R_HIP = 24
+L_SHOULDER, R_SHOULDER = 11, 12
+L_WRIST, R_WRIST       = 15, 16
+MOUTH_L, MOUTH_R       = 9, 10
 
-# Ajustes de “sensibilidad” de cabeza
-HEAD_GAIN_PITCH = 1.6
-HEAD_GAIN_YAW   = 1.6
-HEAD_GAIN_ROLL  = 1.3
-HEAD_DEADZONE_DEG = 2.0  # elimina jitter pequeño
+# ------------------ Tablas de calibración ------------------
+CAL_TABLES = {
+    "pitch": [(29.0,0), (37.0,50), (47.0,100)],          # plano ZY
+    "yaw":   [(72.0,0), (90.0,50), (108.0,100)],         # plano XZ
+    "roll":  [(83.0,0), (90.0,50), (97.0,100)],          # plano XY (ojo: si cambias método recalibra)
+    "AL_v":  [(114.0,0), (90.0,50), (70.0,100)],         # XY
+    "AL_h":  [(70.0,0), (90.0,50), (114.0,100)],         # ZX
+    "AR_v":  [(-114.0,0), (-90.0,50), (-70.0,100)],      # XY
+    "AR_h":  [(-70.0,0), (-90.0,50), (-114.0,100)],      # ZX
+}
 
+# ------------------ Utilidades ------------------
 def _normalize(v: np.ndarray) -> np.ndarray:
     n = np.linalg.norm(v)
-    if n == 0:
-        return v
-    return v / n
+    return v / n if n > 1e-6 else v
 
-
-def _angle_in_plane(v: np.ndarray, axis1: np.ndarray, axis2: np.ndarray) -> float:
-    """Proyecta v en plano (axis1, axis2) y devuelve ángulo atan2 en grados."""
-    x = np.dot(v, axis1)
-    y = np.dot(v, axis2)
-    return math.degrees(math.atan2(y, x))
-
-def _apply_deadzone(a_deg: float, dz_deg: float) -> float:
-    if abs(a_deg) <= dz_deg:
+def project_and_angle(v: np.ndarray, i: int, j: int) -> float:
+    """
+    Proyecta el vector v en el plano definido por e_i, e_j y devuelve atan2(comp_j, comp_i) en grados.
+    Ej: (Y,Z) => i=1, j=2
+    """
+    p = np.array([0.0, 0.0, 0.0])
+    p[i] = v[i]; p[j] = v[j]
+    n = np.linalg.norm(p)
+    if n < 1e-6:
         return 0.0
-    return a_deg - dz_deg * math.copysign(1.0, a_deg)
+    p /= n
+    return math.degrees(math.atan2(p[j], p[i]))
 
-def normalize_to_robot(value: float, min_angle: float, max_angle: float,
-                       min_robot: int = 0, max_robot: int = 100) -> int:
-    """Escala ángulos a [0–100] con clipping."""
-    if max_angle == min_angle:
-        return int((min_robot + max_robot) / 2)
-    t = (value - min_angle) / (max_angle - min_angle)
-    return int(np.clip(min_robot + t * (max_robot - min_robot), min_robot, max_robot))
+def interp_lookup(angle: float, table: list[tuple[float,int]]) -> int:
+    """Interpola en tabla (ángulo, valor) con N puntos calibrados."""
+    if not table:
+        return 50
+    table = sorted(table, key=lambda p: p[0])
+    if angle <= table[0][0]:
+        return table[0][1]
+    if angle >= table[-1][0]:
+        return table[-1][1]
+    for (a1,v1),(a2,v2) in zip(table, table[1:]):
+        if a2 == a1:  # evita división por cero
+            continue
+        if (a1 <= angle <= a2) or (a1 >= angle >= a2):  # soporta crec/decrec
+            t = (angle - a1) / (a2 - a1)
+            return int(round(v1 + t*(v2 - v1)))
+    return table[-1][1]
 
-def build_torso_axes(pose: Dict[int, Tuple[float, float, float]]):
-    """Construye los ejes X, Y, Z del torso a partir de hombros y caderas."""
-    Ls = np.array(pose[L_SHOULDER])
-    Rs = np.array(pose[R_SHOULDER])
-    Lh = np.array(pose[L_HIP])
-    Rh = np.array(pose[R_HIP])
+def apply_deadzone_servo(value: int, center: int = 50, dz: int = 2) -> int:
+    """Deadzone en espacio servo (0..100)."""
+    return center if abs(value - center) < dz else value
 
-    center_shoulders = (Ls + Rs) / 2
-    center_hips = (Lh + Rh) / 2
+def has_keys(pose, keys):
+    return pose is not None and all(k in pose for k in keys)
 
-    X = _normalize(Rs - Ls)                        # eje X: hombros
-    Y = _normalize(center_shoulders - center_hips) # eje Y: vertical torso
-    Z = _normalize(np.cross(X, Y))                 # eje Z: normal al plano XY
-    return X, Y, Z, center_shoulders
+# ------------------ Ángulos crudos ------------------
+def raw_pitch(pose):
+    if not has_keys(pose, [NOSE,L_SHOULDER,R_SHOULDER]): return 37.0
+    nose = np.array(pose[NOSE]); Ls = np.array(pose[L_SHOULDER]); Rs = np.array(pose[R_SHOULDER])
+    center = (Ls + Rs) / 2.0
+    v = _normalize(nose - center)
+    return project_and_angle(v, 1, 2)  # (Y,Z)
 
+def raw_yaw(pose):
+    if not has_keys(pose, [NOSE,L_SHOULDER,R_SHOULDER]): return 90.0
+    nose = np.array(pose[NOSE]); Ls = np.array(pose[L_SHOULDER]); Rs = np.array(pose[R_SHOULDER])
+    center = (Ls + Rs) / 2.0
+    v = _normalize(nose - center)
+    return project_and_angle(v, 0, 2)  # (X,Z)
 
-def head_angles(pose: Dict[int, Tuple[float, float, float]]) -> Tuple[int, int, int]:
-    """Calcula (pitch, yaw, roll) de la cabeza usando vector nariz→centro hombros."""
-    if pose is None or NOSE not in pose or L_SHOULDER not in pose or R_SHOULDER not in pose or L_HIP not in pose or R_HIP not in pose:
-        return 50, 50, 50
+def raw_roll(pose):
+    if not has_keys(pose, [MOUTH_L,MOUTH_R]): return 90.0
+    ml = np.array(pose[MOUTH_L]); mr = np.array(pose[MOUTH_R])
+    u = mr - ml; u[2] = 0.0
+    if np.linalg.norm(u[:2]) < 1e-6:
+        return 90.0
+    return project_and_angle(u, 0, 1)  # (X,Y)
 
-    X, Y, Z, center_shoulders = build_torso_axes(pose)
-    nose = np.array(pose[NOSE])
-    V_head = _normalize(nose - center_shoulders)
+def raw_AL_v(pose):
+    if not has_keys(pose, [L_SHOULDER,L_WRIST]): return 90.0
+    Ls = np.array(pose[L_SHOULDER]); Lw = np.array(pose[L_WRIST])
+    v = _normalize(Ls - Lw)  # invertido
+    return project_and_angle(v, 0, 1)  # (X,Y)
 
-    # Ángulos “geométricos”
-    pitch_angle = _angle_in_plane(V_head, Y, Z)   # arriba/abajo (plano YZ)
-    yaw_angle   = _angle_in_plane(V_head, X, Z)   # izquierda/derecha (plano XZ)
-    roll_angle  = _angle_in_plane(V_head, X, Y)   # inclinación (plano XY)
+def raw_AL_h(pose):
+    if not has_keys(pose, [L_SHOULDER,L_WRIST]): return 90.0
+    Ls = np.array(pose[L_SHOULDER]); Lw = np.array(pose[L_WRIST])
+    v = _normalize(Ls - Lw)  # invertido
+    return project_and_angle(v, 0, 2)  # (X,Z)
 
-    # Ganancia + deadzone + clamp
-    pitch_angle = _apply_deadzone(pitch_angle * HEAD_GAIN_PITCH, HEAD_DEADZONE_DEG)
-    yaw_angle   = _apply_deadzone(yaw_angle   * HEAD_GAIN_YAW,   HEAD_DEADZONE_DEG)
-    roll_angle  = _apply_deadzone(roll_angle  * HEAD_GAIN_ROLL,  HEAD_DEADZONE_DEG)
+def raw_AR_v(pose):
+    if not has_keys(pose, [R_SHOULDER,R_WRIST]): return -90.0
+    Rs = np.array(pose[R_SHOULDER]); Rw = np.array(pose[R_WRIST])
+    v = _normalize(Rw - Rs)
+    return project_and_angle(v, 0, 1)  # (X,Y)
 
-    pitch = normalize_to_robot(np.clip(pitch_angle, -60, 60), -60, 60)
-    yaw   = normalize_to_robot(np.clip(yaw_angle,   -60, 60), -60, 60)
-    roll  = normalize_to_robot(np.clip(roll_angle,  -45, 45), -45, 45)
-    return pitch, yaw, roll
+def raw_AR_h(pose):
+    if not has_keys(pose, [R_SHOULDER,R_WRIST]): return -90.0
+    Rs = np.array(pose[R_SHOULDER]); Rw = np.array(pose[R_WRIST])
+    v = _normalize(Rw - Rs)
+    return project_and_angle(v, 0, 2)  # (X,Z)
 
+# ------------------ Salida final ------------------
+def to_loly_pose(pose_lm: Dict[int, Tuple[float,float,float]], size: Tuple[int,int]) -> Dict:
+    pitch = interp_lookup(raw_pitch(pose_lm), CAL_TABLES["pitch"])
+    yaw   = interp_lookup(raw_yaw(pose_lm),   CAL_TABLES["yaw"])
+    roll  = interp_lookup(raw_roll(pose_lm),  CAL_TABLES["roll"])
+    Lv    = interp_lookup(raw_AL_v(pose_lm),  CAL_TABLES["AL_v"])
+    Lh    = interp_lookup(raw_AL_h(pose_lm),  CAL_TABLES["AL_h"])
+    Rv    = interp_lookup(raw_AR_v(pose_lm),  CAL_TABLES["AR_v"])
+    Rh    = interp_lookup(raw_AR_h(pose_lm),  CAL_TABLES["AR_h"])
 
-def wing_channels(pose: Dict[int, Tuple[float, float, float]]) -> Tuple[int, int, int, int]:
-    """Calcula (L.vertical, L.horizontal, R.vertical, R.horizontal) usando hombro→muñeca y torso."""
-    if pose is None:
-        return 50, 50, 50, 50
-
-    X, Y, Z, _ = build_torso_axes(pose)
-    
-    Ls = np.array(pose[L_SHOULDER])
-    Lw = np.array(pose[L_WRIST])
-    Le = np.array(pose[L_ELBOW])
-    Rs = np.array(pose[R_SHOULDER])
-    Rw = np.array(pose[R_WRIST])
-    Re = np.array(pose[R_ELBOW])
-
-    V_left  = _normalize(0.7 * (Lw - Ls) + 0.3 * (Le - Ls))
-    V_right = _normalize(0.7 * (Rw - Rs) + 0.3 * (Re - Rs))
-
-    # Ala izquierda
-    left_vertical   = _angle_in_plane(V_left, Y, Z)
-    left_horizontal = float(np.clip(np.dot(V_left,  Z), -1.0, 1.0))
-    Lv = 100 - normalize_to_robot(np.clip(left_vertical,  -90, 90), -90, 90)
-    Lh = normalize_to_robot(-left_horizontal,  -0.8, 0.8)
-
-    # Ala derecha
-    right_vertical   = _angle_in_plane(V_right, Y, Z)
-    right_horizontal = float(np.clip(np.dot(V_right, Z), -1.0, 1.0))
-    Rv = 100 - normalize_to_robot(np.clip(right_vertical, -90, 90), -90, 90)
-    Rh = normalize_to_robot(-right_horizontal, -0.8, 0.8)
-
-    return Lv, Lh, Rv, Rh
-
-
-def to_loly_pose(pose_lm: Dict, size: Tuple[int, int]) -> Dict:
-    pitch, yaw, roll = head_angles(pose_lm)
-    Lv, Lh, Rv, Rh = wing_channels(pose_lm)
+    # aplica deadzone antes de devolver
+    pitch = apply_deadzone_servo(pitch)
+    yaw   = apply_deadzone_servo(yaw)
+    roll  = apply_deadzone_servo(roll)
+    Lv    = apply_deadzone_servo(Lv)
+    Lh    = apply_deadzone_servo(Lh)
+    Rv    = apply_deadzone_servo(Rv)
+    Rh    = apply_deadzone_servo(Rh)
 
     return {
         "head": {"pitch": pitch, "yaw": yaw, "row": roll},
