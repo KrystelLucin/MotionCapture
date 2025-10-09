@@ -4,14 +4,15 @@ from typing import Dict, Tuple
 
 # Índices de MediaPipe Pose
 NOSE = 0
+MOUTH_L, MOUTH_R       = 9, 10
 L_SHOULDER, R_SHOULDER = 11, 12
 L_WRIST, R_WRIST       = 15, 16
-MOUTH_L, MOUTH_R       = 9, 10
+L_HIP, R_HIP           = 23, 24
 
 # ------------------ Tablas de calibración ------------------
 CAL_TABLES = {
-    "pitch": [(29.0,0), (37.0,50), (47.0,100)],          # plano ZY
-    "yaw":   [(72.0,0), (90.0,50), (108.0,100)],         # plano XZ
+    "pitch": [(39.0,0), (47.0,50), (57.0,100)],          # plano ZY
+    "yaw":   [(-18.0,0), (0.0,50), (18.0,100)],         # plano XZ
     "roll":  [(83.0,0), (90.0,50), (97.0,100)],          # plano XY (ojo: si cambias método recalibra)
     "AL_v":  [(114.0,0), (90.0,50), (70.0,100)],         # XY
     "AL_h":  [(70.0,0), (90.0,50), (114.0,100)],         # ZX
@@ -61,20 +62,51 @@ def apply_deadzone_servo(value: int, center: int = 50, dz: int = 2) -> int:
 def has_keys(pose, keys):
     return pose is not None and all(k in pose for k in keys)
 
+def _to_0_180(deg: float) -> float:
+    # Lleva cualquier ángulo a [0,180], que es lo que esperan tus tablas
+    a = (deg + 360.0) % 360.0
+    return 360.0 - a if a > 180.0 else a
+
+# ------------------ Torso ------------------
+def build_torso_axes(pose):
+    Ls = np.array(pose[L_SHOULDER], dtype=float)
+    Rs = np.array(pose[R_SHOULDER], dtype=float)
+    center_shoulders = (Ls + Rs) / 2.0
+
+    # Eje X = hombros (izq→der)
+    X = _normalize(Rs - Ls)
+    # Eje Y = vertical aproximada (constante)
+    Y = np.array([0.0, 1.0, 0.0])  # eje vertical de cámara
+    # Eje Z = normal al plano formado
+    Z = _normalize(np.cross(X, Y))
+    # Re-ortonormaliza Y ⟂ X,Z
+    Y = _normalize(np.cross(Z, X))
+
+    R = np.stack([X, Y, Z], axis=0)
+    return R, center_shoulders
+
 # ------------------ Ángulos crudos ------------------
+
+# ------------------ Cabeza ------------------
 def raw_pitch(pose):
-    if not has_keys(pose, [NOSE,L_SHOULDER,R_SHOULDER]): return 37.0
-    nose = np.array(pose[NOSE]); Ls = np.array(pose[L_SHOULDER]); Rs = np.array(pose[R_SHOULDER])
-    center = (Ls + Rs) / 2.0
-    v = _normalize(nose - center)
-    return project_and_angle(v, 1, 2)  # (Y,Z)
+    if not has_keys(pose, [NOSE, L_SHOULDER, R_SHOULDER]): 
+        return 127.0
+    nose_y = pose[NOSE][1]
+    shoulders_y = (pose[L_SHOULDER][1] + pose[R_SHOULDER][1]) / 2
+    dy = shoulders_y - nose_y
+    ang = math.degrees(math.atan2(dy, 0.4))  # 0.4 = factor de escala fijo
+    return _to_0_180(ang)
 
 def raw_yaw(pose):
-    if not has_keys(pose, [NOSE,L_SHOULDER,R_SHOULDER]): return 90.0
-    nose = np.array(pose[NOSE]); Ls = np.array(pose[L_SHOULDER]); Rs = np.array(pose[R_SHOULDER])
-    center = (Ls + Rs) / 2.0
-    v = _normalize(nose - center)
-    return project_and_angle(v, 0, 2)  # (X,Z)
+    if not has_keys(pose, [NOSE, L_SHOULDER, R_SHOULDER]): 
+        return 0.0
+    Ls = np.array(pose[L_SHOULDER]); Rs = np.array(pose[R_SHOULDER])
+    center_sh = (Ls + Rs) / 2
+    nose = np.array(pose[NOSE])
+    dx = nose[0] - center_sh[0]   # desplazamiento horizontal
+    dz = np.linalg.norm(Rs - Ls)  # anchura de hombros como escala
+    ang = math.degrees(math.atan2(dx, dz))  # signo correcto
+    return ang  # ya puede ser negativo o positivo
 
 def raw_roll(pose):
     if not has_keys(pose, [MOUTH_L,MOUTH_R]): return 90.0
@@ -84,6 +116,7 @@ def raw_roll(pose):
         return 90.0
     return project_and_angle(u, 0, 1)  # (X,Y)
 
+# ------------------ Brazos ------------------
 def raw_AL_v(pose):
     if not has_keys(pose, [L_SHOULDER,L_WRIST]): return 90.0
     Ls = np.array(pose[L_SHOULDER]); Lw = np.array(pose[L_WRIST])
@@ -118,7 +151,6 @@ def to_loly_pose(pose_lm: Dict[int, Tuple[float,float,float]], size: Tuple[int,i
     Rv    = interp_lookup(raw_AR_v(pose_lm),  CAL_TABLES["AR_v"])
     Rh    = interp_lookup(raw_AR_h(pose_lm),  CAL_TABLES["AR_h"])
 
-    # aplica deadzone antes de devolver
     pitch = apply_deadzone_servo(pitch)
     yaw   = apply_deadzone_servo(yaw)
     roll  = apply_deadzone_servo(roll)

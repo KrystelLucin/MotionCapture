@@ -46,13 +46,13 @@ def main():
             posAlaR_h = int(pose["wing_R"]["horizontal"])
             posPico   = 0 
             
-            posPitch = f_pitch(posPitch)
-            posYaw   = f_yaw(posYaw)
-            posRoll  = f_roll(posRoll)
-            posAlaL_v = f_Lv(posAlaL_v)
-            posAlaL_h = f_Lh(posAlaL_h)
-            posAlaR_v = f_Rv(posAlaR_v)
-            posAlaR_h = f_Rh(posAlaR_h)
+            # posPitch = f_pitch(posPitch)
+            # posYaw   = f_yaw(posYaw)
+            # posRoll  = f_roll(posRoll)
+            # posAlaL_v = f_Lv(posAlaL_v)
+            # posAlaL_h = f_Lh(posAlaL_h)
+            # posAlaR_v = f_Rv(posAlaR_v)
+            # posAlaR_h = f_Rh(posAlaR_h)
             
             trama = bytearray([
                 idop, posPitch, posYaw, posRoll,
