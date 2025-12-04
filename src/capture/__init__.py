@@ -1,1 +1,0 @@
-"""Módulo de captura de video para Loly Motion Capture."""

@@ -1,1 +1,0 @@
-"""Módulo de exportación de movimientos a formato JSON."""
